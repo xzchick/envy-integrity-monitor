@@ -1,0 +1,167 @@
+"""Core Integrity Monitor tests: encrypted baselines, tree scanning, change
+detection (added/removed/modified), revision-preserving accept, the journal hash
+chain, export and the no-overwrite guarantee.
+"""
+
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from envy_integrity_monitor import core
+from envy_integrity_monitor.core import IntegrityError
+
+
+class IntegrityTest(unittest.TestCase):
+    SECRET = b"a long private integrity passphrase"
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="envy-integrity-"))
+        self.addCleanup(__import__("shutil").rmtree, self.dir)
+        self.tree = self.dir / "watched"
+        self.tree.mkdir()
+        (self.tree / "a.txt").write_text("alpha")
+        (self.tree / "sub").mkdir()
+        (self.tree / "sub" / "b.bin").write_bytes(b"\x00\x01\x02beta")
+
+    def baseline(self, name="base.envymon", title="Project"):
+        path = self.dir / name
+        core.create(path, title, self.tree, self.SECRET)
+        return path
+
+    # ----- envelope / create -------------------------------------------
+    def test_encrypted_round_trip_and_magic(self):
+        blob = core.encrypt_bytes(b"x", self.SECRET)
+        self.assertEqual(blob[:11], b"ENVYVAULT2\x00")
+        self.assertEqual(core.decrypt_bytes(blob, self.SECRET), b"x")
+
+    def test_create_baselines_the_tree(self):
+        path = self.baseline(title="Night watch")
+        data, _ = core._load(path, self.SECRET)
+        self.assertEqual(data["revision"], 0)
+        self.assertEqual(data["title"], "Night watch")
+        paths = [e["path"] for e in data["files"]]
+        self.assertEqual(paths, ["a.txt", "sub/b.bin"])  # sorted, relative, posix
+        self.assertTrue(all(len(e["sha256"]) == 64 for e in data["files"]))
+
+    def test_short_passphrase_rejected(self):
+        with self.assertRaises(IntegrityError):
+            core.create(self.dir / "s", "t", self.tree, b"short")
+
+    def test_scan_skips_symlinks(self):
+        target = self.tree / "a.txt"
+        try:
+            (self.tree / "link.txt").symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        paths = [e["path"] for e in core.scan_tree(self.tree)]
+        self.assertNotIn("link.txt", paths)
+
+    # ----- diff / check ------------------------------------------------
+    def test_check_clean_when_unchanged(self):
+        path = self.baseline()
+        report = core.check(path, self.SECRET)
+        self.assertTrue(report["clean"])
+        self.assertEqual(report["changed"], 0)
+        self.assertEqual(report["unchanged"], 2)
+
+    def test_check_detects_added_removed_modified(self):
+        path = self.baseline()
+        (self.tree / "a.txt").write_text("ALPHA-changed")        # modified
+        (self.tree / "sub" / "b.bin").unlink()                   # removed
+        (self.tree / "c.new").write_text("new file")             # added
+        report = core.check(path, self.SECRET)
+        self.assertFalse(report["clean"])
+        self.assertEqual([e["path"] for e in report["added"]], ["c.new"])
+        self.assertEqual([e["path"] for e in report["removed"]], ["sub/b.bin"])
+        self.assertEqual([m["path"] for m in report["modified"]], ["a.txt"])
+        mod = report["modified"][0]
+        self.assertNotEqual(mod["old_sha256"], mod["new_sha256"])
+
+    def test_change_and_change_back_looks_unchanged(self):
+        path = self.baseline()
+        original = (self.tree / "a.txt").read_text()
+        (self.tree / "a.txt").write_text("temporarily different")
+        (self.tree / "a.txt").write_text(original)
+        self.assertTrue(core.check(path, self.SECRET)["clean"])
+
+    # ----- accept / journal --------------------------------------------
+    def test_accept_writes_new_revision_and_chains(self):
+        p0 = self.baseline()
+        (self.tree / "c.new").write_text("added")
+        p1 = self.dir / "base.r1.envymon"
+        res = core.accept(p0, p1, self.SECRET)
+        self.assertEqual(res["revision"], 1)
+        self.assertTrue(p0.exists(), "previous revision preserved")
+        data, _ = core._load(p1, self.SECRET)
+        self.assertEqual(data["journal"][0]["check"]["added"], 1)
+        # After accepting, a fresh check is clean.
+        self.assertTrue(core.check(p1, self.SECRET)["clean"])
+        # A second accept chains onto the first.
+        (self.tree / "d.new").write_text("more")
+        p2 = self.dir / "base.r2.envymon"
+        core.accept(p1, p2, self.SECRET)
+        data2, _ = core._load(p2, self.SECRET)
+        self.assertEqual(data2["journal"][1]["previous_sha256"], data2["journal"][0]["record_sha256"])
+
+    def test_tampered_baseline_breaks_chain(self):
+        p0 = self.baseline()
+        (self.tree / "c.new").write_text("x")
+        p1 = self.dir / "base.r1.envymon"
+        core.accept(p0, p1, self.SECRET)
+        data, _ = core._load(p1, self.SECRET)
+        data["journal"][0]["check"]["added"] = 999   # tamper without re-hashing
+        forged = self.dir / "forged.envymon"
+        forged.write_bytes(core.encrypt_bytes(core._canonical(data), self.SECRET))
+        with self.assertRaises(IntegrityError):
+            core.inspect(forged, self.SECRET)
+
+    # ----- export -------------------------------------------------------
+    def test_export_html_and_json(self):
+        path = self.baseline()
+        (self.tree / "a.txt").write_text("changed now")
+        html_out = self.dir / "r.html"
+        res = core.export(path, html_out, self.SECRET, "html")
+        text = html_out.read_text()
+        self.assertIn("Content-Security-Policy", text)
+        self.assertIn("a.txt", text)
+        self.assertFalse(res["clean"])
+        json_out = self.dir / "r.json"
+        core.export(path, json_out, self.SECRET, "json")
+        report = json.loads(json_out.read_text())
+        self.assertIn("limitations", report)
+        self.assertEqual(len(report["modified"]), 1)
+
+    def test_export_escapes_markup_in_paths(self):
+        # Inject a baseline entry whose path contains markup (Windows forbids such a real
+        # filename). Absent on disk, it shows as "removed" and must be HTML-escaped.
+        path = self.baseline()
+        data, _ = core._load(path, self.SECRET)
+        data["files"].append({"path": "weird<name>.txt", "size": 1, "sha256": "ab" * 32})
+        data["files"].sort(key=lambda e: e["path"])
+        forged = self.dir / "crafted.envymon"
+        forged.write_bytes(core.encrypt_bytes(core._canonical(data), self.SECRET))
+        out = self.dir / "r.html"
+        core.export(forged, out, self.SECRET, "html")
+        body = out.read_text()
+        self.assertNotIn("weird<name>", body)
+        self.assertIn("&lt;name&gt;", body)
+
+    # ----- no overwrite -------------------------------------------------
+    def test_new_file_never_overwrites(self):
+        keep = self.dir / "keep"
+        keep.write_bytes(b"precious")
+        with self.assertRaises(IntegrityError):
+            core.new_file(keep, b"clobber")
+        self.assertEqual(keep.read_bytes(), b"precious")
+
+    def test_accept_refuses_to_overwrite(self):
+        p0 = self.baseline()
+        dest = self.dir / "exists.envymon"; dest.write_bytes(b"keep me")
+        with self.assertRaises(IntegrityError):
+            core.accept(p0, dest, self.SECRET)
+        self.assertEqual(dest.read_bytes(), b"keep me")
+
+
+if __name__ == "__main__":
+    unittest.main()
