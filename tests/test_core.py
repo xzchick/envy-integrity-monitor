@@ -78,6 +78,27 @@ class IntegrityTest(unittest.TestCase):
         mod = report["modified"][0]
         self.assertNotEqual(mod["old_sha256"], mod["new_sha256"])
 
+    def test_ignore_globs_suppress_changes(self):
+        path = self.baseline()
+        (self.tree / "app.log").write_text("noise")          # added, but should be ignored
+        (self.tree / "cache").mkdir()
+        (self.tree / "cache" / "x.tmp").write_text("junk")   # whole dir ignored
+        # Without ignore: changes are seen.
+        self.assertFalse(core.check(path, self.SECRET)["clean"])
+        # With ignore globs: the folder looks clean.
+        report = core.check(path, self.SECRET, ignore=["*.log", "cache"])
+        self.assertTrue(report["clean"], report)
+
+    def test_ignore_also_filters_baseline_side(self):
+        # A file present at baseline but later ignored must not show as "removed".
+        self.baseline()  # a.txt, sub/b.bin
+        path = self.dir / "withlog.envymon"
+        (self.tree / "keep.log").write_text("v1")
+        core.create(path, "t", self.tree, self.SECRET)
+        (self.tree / "keep.log").unlink()                    # removed since baseline
+        self.assertFalse(core.check(path, self.SECRET)["clean"])
+        self.assertTrue(core.check(path, self.SECRET, ignore=["*.log"])["clean"])
+
     def test_change_and_change_back_looks_unchanged(self):
         path = self.baseline()
         original = (self.tree / "a.txt").read_text()
