@@ -59,6 +59,17 @@ class CLITest(unittest.TestCase):
         code, out, _ = self.invoke("check", r1)
         self.assertEqual(code, 0)
 
+    def test_check_json(self):
+        base = self.dir / "m.envymon"
+        self.invoke("baseline", base, self.tree, "--title", "Proj")
+        (self.tree / "a.txt").write_text("changed")
+        code, out, _ = self.invoke("check", base, "--json")
+        self.assertEqual(code, 1)                      # a change -> exit 1
+        report = json.loads(out)
+        self.assertEqual(len(report["modified"]), 1)
+        self.assertFalse(report["clean"])
+        self.assertIn("scanned_utc", report)
+
     def test_inspect_and_export(self):
         base = self.dir / "m.envymon"
         self.invoke("baseline", base, self.tree, "--title", "Proj")
