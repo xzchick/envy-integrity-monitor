@@ -138,6 +138,19 @@ def _rel_text(value):
     return value
 
 
+MAX_IGNORE = 128
+
+
+def _validate_ignore(value):
+    """A baseline's stored ignore globs: a list of short gitignore-style patterns."""
+    if not isinstance(value, list) or len(value) > MAX_IGNORE:
+        raise IntegrityError("Invalid ignore list")
+    for pattern in value:
+        if not isinstance(pattern, str) or not pattern.strip() or len(pattern) > 200 or "\x00" in pattern:
+            raise IntegrityError("Each ignore pattern must be a short glob string")
+    return value
+
+
 def _validate_entry(value):
     if not isinstance(value, dict) or set(value) != {"path", "size", "sha256"}:
         raise IntegrityError("Invalid baseline file entry")
@@ -163,13 +176,14 @@ def _validate_check(value):
 
 def _validate_baseline(data):
     fields = {"schema", "monitor_id", "title", "root", "created_utc", "revision",
-              "previous_envelope_sha256", "files", "journal"}
+              "previous_envelope_sha256", "files", "journal", "ignore"}
     if not isinstance(data, dict) or set(data) != fields or type(data["schema"]) is not int or data["schema"] != 1:
         raise IntegrityError("Unsupported encrypted baseline schema")
     if not isinstance(data["title"], str) or not data["title"].strip() or len(data["title"]) > 200:
         raise IntegrityError("Invalid monitor title")
     if not isinstance(data["root"], str) or not data["root"] or len(data["root"]) > 4096:
         raise IntegrityError("Invalid monitored root path")
+    _validate_ignore(data["ignore"])
     try:
         uuid.UUID(data["monitor_id"])
     except (ValueError, TypeError, AttributeError):
@@ -271,13 +285,21 @@ def _hash_file(path) -> str:
 
 # --- Load / write ------------------------------------------------------------
 
+def _migrate(data):
+    """Bring an older baseline forward in memory. The stored ignore list arrived in
+    v0.2; a baseline that predates it gets an empty one. The journal is unaffected."""
+    if isinstance(data, dict) and "ignore" not in data:
+        data["ignore"] = []
+    return data
+
+
 def _load(source, secret):
     encrypted = read_regular(source, MAX_ENVELOPE)
     try:
         data = json.loads(decrypt_bytes(encrypted, secret))
     except (json.JSONDecodeError, UnicodeError, RecursionError):
         raise IntegrityError("Encrypted baseline does not contain valid JSON") from None
-    return _validate_baseline(data), hashlib.sha256(encrypted).hexdigest()
+    return _validate_baseline(_migrate(data)), hashlib.sha256(encrypted).hexdigest()
 
 
 def _write(destination, data, secret):
@@ -290,14 +312,15 @@ def _write(destination, data, secret):
             "files": len(data["files"]), "encrypted": True, "previous_revision_preserved": True}
 
 
-def create(destination, title, root, secret):
-    files = scan_tree(root)
+def create(destination, title, root, secret, ignore=()):
+    ignore = sorted(set(_validate_ignore(list(ignore or ()))))
+    files = scan_tree(root, ignore)
     data = {"schema": 1, "monitor_id": str(uuid.uuid4()),
             "title": _title(title), "root": str(Path(root).expanduser().resolve()),
             "created_utc": _utc(), "revision": 0, "previous_envelope_sha256": "0" * 64,
-            "files": files, "journal": []}
+            "files": files, "journal": [], "ignore": ignore}
     result = _write(destination, data, secret)
-    return dict(result, baselined_files=len(files))
+    return dict(result, baselined_files=len(files), ignore=ignore)
 
 
 def _title(value):
@@ -331,24 +354,32 @@ def check(source, secret, root=None, ignore=()):
     baseline, so they are never reported as changed, added or removed.
     """
     data, _ = _load(source, secret)
-    ignore = tuple(ignore or ())
+    # The baseline's stored globs always apply; any passed here are added on top.
+    ignore = tuple(dict.fromkeys(tuple(data["ignore"]) + tuple(ignore or ())))
     current = scan_tree(root or data["root"], ignore)
     baseline_files = [e for e in data["files"] if not _match_ignore(e["path"], ignore)] if ignore else data["files"]
     report = diff(baseline_files, current)
     changed = len(report["added"]) + len(report["removed"]) + len(report["modified"])
     return {"monitor_id": data["monitor_id"], "title": data["title"], "root": root or data["root"],
-            "revision": data["revision"], "scanned_utc": _utc(),
+            "ignore": list(ignore), "revision": data["revision"], "scanned_utc": _utc(),
             "added": report["added"], "removed": report["removed"], "modified": report["modified"],
             "unchanged": report["unchanged"], "changed": changed, "clean": changed == 0,
             "basis": "A difference proves the bytes changed since the baseline — not who changed them, "
                      "when, or whether the change is benign."}
 
 
-def accept(source, destination, secret, root=None):
-    """Re-scan, record the change summary in the journal, and write a new baseline revision."""
+def accept(source, destination, secret, root=None, ignore=()):
+    """Re-scan, record the change summary in the journal, and write a new baseline revision.
+
+    The baseline's stored ignore globs are honoured (so accepting does not re-add the
+    files you chose to ignore); any passed here are merged in and persisted.
+    """
     data, previous_envelope = _load(source, secret)
-    current = scan_tree(root or data["root"])
-    report = diff(data["files"], current)
+    merged = sorted(set(tuple(data["ignore"]) + tuple(_validate_ignore(list(ignore or ())))))
+    data["ignore"] = merged
+    current = scan_tree(root or data["root"], merged)
+    baseline_files = [e for e in data["files"] if not _match_ignore(e["path"], merged)] if merged else data["files"]
+    report = diff(baseline_files, current)
     summary = {"scanned_utc": _utc(),
                "added": len(report["added"]), "removed": len(report["removed"]),
                "modified": len(report["modified"]), "unchanged": report["unchanged"]}
@@ -367,6 +398,7 @@ def accept(source, destination, secret, root=None):
 def inspect(source, secret):
     data, envelope = _load(source, secret)
     return {"monitor_id": data["monitor_id"], "title": data["title"], "root": data["root"],
+            "ignore": data["ignore"],
             "revision": data["revision"], "created_utc": data["created_utc"], "envelope_sha256": envelope,
             "files": data["files"],
             "journal": [{"recorded_utc": r["recorded_utc"], **r["check"]} for r in data["journal"]],

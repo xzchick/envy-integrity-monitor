@@ -29,6 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
     new.add_argument("destination", help="a new baseline file; never overwritten")
     new.add_argument("folder", help="the folder to monitor")
     new.add_argument("--title", required=True, help="a name for this monitor")
+    new.add_argument("--ignore", action="append", default=[], metavar="GLOB",
+                     help="skip paths matching this glob; stored in the baseline and applied to every "
+                          "check and accept (repeatable, .gitignore-style)")
 
     chk = commands.add_parser("check", help="report changes since the baseline (read-only)")
     chk.add_argument("baseline")
@@ -41,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     acc.add_argument("baseline")
     acc.add_argument("destination", help="a new baseline file; never overwritten")
     acc.add_argument("--folder", default=None)
+    acc.add_argument("--ignore", action="append", default=[], metavar="GLOB",
+                     help="add a glob to the baseline's stored ignore list (repeatable)")
 
     insp = commands.add_parser("inspect", help="print the decrypted baseline and journal (read-only)")
     insp.add_argument("baseline")
@@ -64,8 +69,9 @@ def _passphrase(confirm: bool = False) -> bytes:
 
 def _run(args) -> int:
     if args.command == "baseline":
-        result = create(args.destination, args.title, args.folder, _passphrase(confirm=True))
-        print(f"baseline: {result['baselined_files']} files → {result['output']} (revision 0)")
+        result = create(args.destination, args.title, args.folder, _passphrase(confirm=True), ignore=args.ignore)
+        ig = f" (ignoring {len(result['ignore'])} glob(s))" if result["ignore"] else ""
+        print(f"baseline: {result['baselined_files']} files → {result['output']} (revision 0){ig}")
         return 0
     if args.command == "check":
         report = check(args.baseline, _passphrase(), args.folder, ignore=args.ignore)
@@ -77,7 +83,7 @@ def _run(args) -> int:
         print("CLEAN" if report["clean"] else f"{report['changed']} change(s) since the baseline")
         return 0 if report["clean"] else 1
     if args.command == "accept":
-        result = accept(args.baseline, args.destination, _passphrase(), args.folder)
+        result = accept(args.baseline, args.destination, _passphrase(), args.folder, ignore=args.ignore)
         print(f"accepted → {result['output']} (revision {result['revision']})")
         return 0
     if args.command == "export":
