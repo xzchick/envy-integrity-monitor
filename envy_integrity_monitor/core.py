@@ -18,6 +18,7 @@ Standard library only, apart from ``cryptography`` for the encrypted envelope.
 from __future__ import annotations
 
 import datetime
+import fnmatch
 import hashlib
 import html
 import json
@@ -210,14 +211,26 @@ def _validate_baseline(data):
 
 # --- Scanning a directory tree ----------------------------------------------
 
-def scan_tree(root) -> list:
-    """Hash every regular file under ``root`` (no symlink following). Returns sorted entries."""
+def _match_ignore(rel, ignore):
+    """True if a relative posix path matches any .gitignore-style glob (whole path or basename)."""
+    return any(fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(rel.rsplit("/", 1)[-1], pat) for pat in ignore)
+
+
+def scan_tree(root, ignore=()) -> list:
+    """Hash every regular file under ``root`` (no symlink following). Returns sorted entries.
+
+    ``ignore`` is an iterable of glob patterns; matching files, and whole directories, are skipped.
+    """
     root = Path(root).expanduser()
     if not root.is_dir():
         raise IntegrityError("The monitored root must be an existing directory")
+    ignore = tuple(ignore or ())
     entries, count = [], 0
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames.sort()
+        # Prune ignored directories so we never descend into them.
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if not _match_ignore((Path(dirpath, d).relative_to(root)).as_posix(), ignore))
         for name in sorted(filenames):
             full = Path(dirpath) / name
             try:
@@ -226,10 +239,12 @@ def scan_tree(root) -> list:
                 continue
             if not stat.S_ISREG(meta.st_mode):
                 continue  # skip symlinks, sockets, devices
+            rel = full.relative_to(root).as_posix()
+            if _match_ignore(rel, ignore):
+                continue
             count += 1
             if count > MAX_FILES:
                 raise IntegrityError(f"More than {MAX_FILES} files under the root; narrow the scope")
-            rel = full.relative_to(root).as_posix()
             entries.append({"path": _rel_text(rel), "size": meta.st_size, "sha256": _hash_file(full)})
     entries.sort(key=lambda e: e["path"])
     return entries
@@ -309,11 +324,17 @@ def diff(baseline_files, current_files):
     return {"added": added, "removed": removed, "modified": modified, "unchanged": unchanged}
 
 
-def check(source, secret, root=None):
-    """Re-scan the root and report changes since the baseline. Read-only."""
+def check(source, secret, root=None, ignore=()):
+    """Re-scan the root and report changes since the baseline. Read-only.
+
+    ``ignore`` globs suppress matching paths from both the current scan and the
+    baseline, so they are never reported as changed, added or removed.
+    """
     data, _ = _load(source, secret)
-    current = scan_tree(root or data["root"])
-    report = diff(data["files"], current)
+    ignore = tuple(ignore or ())
+    current = scan_tree(root or data["root"], ignore)
+    baseline_files = [e for e in data["files"] if not _match_ignore(e["path"], ignore)] if ignore else data["files"]
+    report = diff(baseline_files, current)
     changed = len(report["added"]) + len(report["removed"]) + len(report["modified"])
     return {"monitor_id": data["monitor_id"], "title": data["title"], "root": root or data["root"],
             "revision": data["revision"], "scanned_utc": _utc(),

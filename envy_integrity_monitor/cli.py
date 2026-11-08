@@ -34,6 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
     chk.add_argument("baseline")
     chk.add_argument("--folder", default=None, help="override the stored root folder")
     chk.add_argument("--json", action="store_true", help="emit the full change report as JSON")
+    chk.add_argument("--ignore", action="append", default=[], metavar="GLOB",
+                     help="skip paths matching this glob (repeatable, .gitignore-style)")
 
     acc = commands.add_parser("accept", help="record the current state as a new baseline revision")
     acc.add_argument("baseline")
@@ -66,7 +68,7 @@ def _run(args) -> int:
         print(f"baseline: {result['baselined_files']} files → {result['output']} (revision 0)")
         return 0
     if args.command == "check":
-        report = check(args.baseline, _passphrase(), args.folder)
+        report = check(args.baseline, _passphrase(), args.folder, ignore=args.ignore)
         if args.json:
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0 if report["clean"] else 1
