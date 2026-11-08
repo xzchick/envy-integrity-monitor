@@ -183,6 +183,45 @@ class IntegrityTest(unittest.TestCase):
             core.accept(p0, dest, self.SECRET)
         self.assertEqual(dest.read_bytes(), b"keep me")
 
+    # ----- persisted ignore list (v0.2) --------------------------------
+    def test_stored_ignore_is_honored_by_check_and_accept(self):
+        path = self.dir / "b.envymon"
+        core.create(path, "t", self.tree, self.SECRET, ignore=["*.log"])
+        data, _ = core._load(path, self.SECRET)
+        self.assertEqual(data["ignore"], ["*.log"])
+        # A new .log must not count as a change, without re-passing the glob.
+        (self.tree / "noise.log").write_text("noise")
+        report = core.check(path, self.SECRET)
+        self.assertTrue(report["clean"])
+        self.assertIn("*.log", report["ignore"])
+        # Accept keeps it out, and a later check stays clean.
+        p2 = self.dir / "b.r1.envymon"
+        core.accept(path, p2, self.SECRET)
+        data2, _ = core._load(p2, self.SECRET)
+        self.assertEqual(data2["ignore"], ["*.log"])
+        self.assertFalse(any(f["path"] == "noise.log" for f in data2["files"]))
+        self.assertTrue(core.check(p2, self.SECRET)["clean"])
+
+    def test_accept_can_extend_the_ignore_list(self):
+        path = self.dir / "b2.envymon"
+        core.create(path, "t", self.tree, self.SECRET)
+        (self.tree / "x.tmp").write_text("tmp")
+        p2 = self.dir / "b2.r1.envymon"
+        core.accept(path, p2, self.SECRET, ignore=["*.tmp"])
+        data2, _ = core._load(p2, self.SECRET)
+        self.assertEqual(data2["ignore"], ["*.tmp"])
+        self.assertFalse(any(f["path"] == "x.tmp" for f in data2["files"]))
+
+    def test_pre_ignore_baseline_migrates_on_load(self):
+        path = self.dir / "b3.envymon"
+        core.create(path, "t", self.tree, self.SECRET)
+        data, _ = core._load(path, self.SECRET)
+        del data["ignore"]                                   # simulate a pre-v0.2 baseline
+        legacy = self.dir / "legacy.envymon"
+        core.new_file(legacy, core.encrypt_bytes(core._canonical(data), self.SECRET))
+        reloaded, _ = core._load(legacy, self.SECRET)        # must not raise
+        self.assertEqual(reloaded["ignore"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
