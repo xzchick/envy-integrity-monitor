@@ -409,8 +409,8 @@ def inspect(source, secret):
 # --- Plaintext export --------------------------------------------------------
 
 def export(source, destination, secret, format="html", root=None):
-    if format not in ("html", "json"):
-        raise IntegrityError("Export format must be html or json")
+    if format not in ("html", "json", "md"):
+        raise IntegrityError("Export format must be html, json or md")
     data, envelope = _load(source, secret)
     report = check(source, secret, root)
     out = {"monitor": {"monitor_id": data["monitor_id"], "title": data["title"], "root": data["root"],
@@ -423,6 +423,24 @@ def export(source, destination, secret, format="html", root=None):
                           "a trusted time."}
     if format == "json":
         output = (json.dumps(out, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    elif format == "md":
+        changed = len(report["added"]) + len(report["removed"]) + len(report["modified"])
+        verdict = "**CLEAN** — no changes since the baseline." if report["clean"] else \
+            f"**{changed} change(s)** since the baseline."
+        lines = [f"# {data['title']} — integrity check", "", out["limitations"], "",
+                 f"- **Monitor:** `{data['monitor_id']}`",
+                 f"- **Root:** `{data['root']}`",
+                 f"- **Revision:** {data['revision']}",
+                 f"- **Scanned:** {report['scanned_utc']}",
+                 f"- {verdict}", "",
+                 f"## Added ({len(report['added'])})"]
+        lines += [f"- `{e['path']}` ({e['size']} bytes)" for e in report["added"]] or ["_None._"]
+        lines += ["", f"## Removed ({len(report['removed'])})"]
+        lines += [f"- `{e['path']}`" for e in report["removed"]] or ["_None._"]
+        lines += ["", f"## Modified ({len(report['modified'])})"]
+        lines += [f"- `{e['path']}` — {e['old_size']}→{e['new_size']} bytes, "
+                  f"`{e['old_sha256'][:12]}…`→`{e['new_sha256'][:12]}…`" for e in report["modified"]] or ["_None._"]
+        output = ("\n".join(lines) + "\n").encode("utf-8")
     else:
         def esc(v):
             return html.escape(str(v), quote=True)
