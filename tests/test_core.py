@@ -223,5 +223,31 @@ class IntegrityTest(unittest.TestCase):
         self.assertEqual(reloaded["ignore"], [])
 
 
+    # ----- Markdown change report (v0.2) -------------------------------
+    def test_export_markdown_change_report(self):
+        path = self.baseline(title="Project")
+        (self.tree / "a.txt").write_text("changed content")
+        (self.tree / "new.txt").write_text("brand new")
+        (self.tree / "sub" / "b.bin").unlink()
+        out = self.dir / "r.md"
+        res = core.export(path, out, self.SECRET, "md")
+        self.assertEqual(res["format"], "md")
+        text = out.read_text()
+        self.assertTrue(text.startswith("# Project — integrity check"))
+        self.assertIn("## Added (1)", text)
+        self.assertIn("new.txt", text)
+        self.assertIn("## Removed (1)", text)
+        self.assertIn("sub/b.bin", text)
+        self.assertIn("## Modified (1)", text)
+        self.assertIn("a.txt", text)
+        self.assertIn("change(s)", text)
+
+    def test_export_markdown_clean(self):
+        path = self.baseline()
+        out = self.dir / "c.md"
+        core.export(path, out, self.SECRET, "md")
+        self.assertIn("CLEAN", out.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
