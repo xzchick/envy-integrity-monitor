@@ -27,7 +27,7 @@ AES-256-GCM encrypted baselines, a hash-chained change journal, revision-preserv
 </p>
 
 <p align="center">
-  <img src="assets/readme/window.png" width="90%" alt="The Integrity Monitor window: a changes table showing an added, a removed and a modified file, coloured by status, in the ENVY neon theme" />
+  <img src="assets/readme/demo.gif" width="90%" alt="The Integrity Monitor window: a changes table showing an added, a removed and a modified file, coloured by status, in the ENVY neon theme" />
 </p>
 
 <p align="center"><sub>A real native window — not a browser view. The title pulses, the stars twinkle, and a light travels the accent bar.</sub></p>
