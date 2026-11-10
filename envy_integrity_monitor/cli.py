@@ -12,7 +12,8 @@ import json
 import sys
 
 from . import __version__
-from .core import IntegrityError, accept, check, check_passphrase, create, export, inspect
+from .core import (IntegrityError, accept, change_bitmask, check, check_passphrase,
+                   create, export, inspect)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,6 +40,9 @@ def build_parser() -> argparse.ArgumentParser:
     chk.add_argument("--json", action="store_true", help="emit the full change report as JSON")
     chk.add_argument("--ignore", action="append", default=[], metavar="GLOB",
                      help="skip paths matching this glob (repeatable, .gitignore-style)")
+    chk.add_argument("--exit-detail", action="store_true",
+                     help="exit with a bitmask of what changed (added=1, removed=2, modified=4; "
+                          "0 when clean) instead of plain 0/1, for CI gating")
 
     acc = commands.add_parser("accept", help="record the current state as a new baseline revision")
     acc.add_argument("baseline")
@@ -75,13 +79,19 @@ def _run(args) -> int:
         return 0
     if args.command == "check":
         report = check(args.baseline, _passphrase(), args.folder, ignore=args.ignore)
+        code = change_bitmask(report) if args.exit_detail else (0 if report["clean"] else 1)
         if args.json:
             print(json.dumps(report, ensure_ascii=False, indent=2))
-            return 0 if report["clean"] else 1
+            return code
         print(f"check: +{len(report['added'])} added, -{len(report['removed'])} removed, "
               f"~{len(report['modified'])} modified, {report['unchanged']} unchanged")
         print("CLEAN" if report["clean"] else f"{report['changed']} change(s) since the baseline")
-        return 0 if report["clean"] else 1
+        if args.exit_detail:
+            flags = "|".join(k for k, present in
+                             (("added", report["added"]), ("removed", report["removed"]),
+                              ("modified", report["modified"])) if present) or "clean"
+            print(f"exit-detail code {code} ({flags})")
+        return code
     if args.command == "accept":
         result = accept(args.baseline, args.destination, _passphrase(), args.folder, ignore=args.ignore)
         print(f"accepted → {result['output']} (revision {result['revision']})")
