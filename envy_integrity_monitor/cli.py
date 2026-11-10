@@ -9,11 +9,12 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import sys
 
 from . import __version__
-from .core import (IntegrityError, accept, change_bitmask, check, check_passphrase,
-                   create, export, inspect)
+from .core import (PASSPHRASE_ENV, IntegrityError, accept, change_bitmask, check,
+                   check_passphrase, create, cron_line, export, inspect, launchd_plist)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,6 +52,18 @@ def build_parser() -> argparse.ArgumentParser:
     acc.add_argument("--ignore", action="append", default=[], metavar="GLOB",
                      help="add a glob to the baseline's stored ignore list (repeatable)")
 
+    sch = commands.add_parser("schedule", help="print a cron line or launchd plist for scheduled checks")
+    sch.add_argument("baseline")
+    sch.add_argument("--launchd", action="store_true",
+                     help="emit a macOS launchd plist instead of a crontab line")
+    sch.add_argument("--cron", default="0 * * * *", metavar="EXPR",
+                     help="cron schedule expression (default: hourly, \"0 * * * *\")")
+    sch.add_argument("--interval", type=int, default=3600, metavar="SECONDS",
+                     help="launchd StartInterval in seconds (default 3600)")
+    sch.add_argument("--binary", default="envy-integrity-monitor",
+                     help="path to the envy-integrity-monitor executable in the schedule")
+    sch.add_argument("--label", default="com.envy.integrity.check", help="launchd job label")
+
     insp = commands.add_parser("inspect", help="print the decrypted baseline and journal (read-only)")
     insp.add_argument("baseline")
 
@@ -64,7 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _passphrase(confirm: bool = False) -> bytes:
     if not sys.stdin.isatty():
-        raise IntegrityError("Open this action in a terminal so the passphrase is not echoed")
+        env = os.environ.get(PASSPHRASE_ENV)
+        if env:
+            return check_passphrase(env.encode())
+        raise IntegrityError("Open this action in a terminal so the passphrase is not echoed, "
+                             f"or set {PASSPHRASE_ENV} for unattended (scheduled) runs")
     value = getpass.getpass("Baseline passphrase: ").encode()
     if confirm and value != getpass.getpass("Repeat passphrase: ").encode():
         raise IntegrityError("Passphrases do not match")
@@ -92,6 +109,22 @@ def _run(args) -> int:
                               ("modified", report["modified"])) if present) or "clean"
             print(f"exit-detail code {code} ({flags})")
         return code
+    if args.command == "schedule":
+        note = ("# Scheduled integrity check. The passphrase must be supplied without a\n"
+                f"# terminal, via the {PASSPHRASE_ENV} environment variable. Storing a\n"
+                "# passphrase where the scheduler can read it weakens its secrecy — only do\n"
+                "# this on a host you trust. The check exits with the --exit-detail bitmask\n"
+                "# (added=1, removed=2, modified=4; 0 when clean).")
+        print(note)
+        if args.launchd:
+            print("# Fill in EnvironmentVariables, then: launchctl load ~/Library/LaunchAgents/<label>.plist")
+            print(launchd_plist(args.baseline, binary=args.binary,
+                                label=args.label, interval_seconds=args.interval))
+        else:
+            print(f'# Add to your crontab (crontab -e), e.g. with the secret on its own line:')
+            print(f"{PASSPHRASE_ENV}=your-passphrase")
+            print(cron_line(args.baseline, binary=args.binary, schedule=args.cron))
+        return 0
     if args.command == "accept":
         result = accept(args.baseline, args.destination, _passphrase(), args.folder, ignore=args.ignore)
         print(f"accepted → {result['output']} (revision {result['revision']})")
