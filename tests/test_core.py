@@ -91,6 +91,30 @@ class IntegrityTest(unittest.TestCase):
         self.assertEqual(code, core.EXIT_ADDED | core.EXIT_REMOVED | core.EXIT_MODIFIED)
         self.assertEqual(code, 7)
 
+    def test_cron_line(self):
+        line = core.cron_line("/data/base.envymon", schedule="*/30 * * * *")
+        self.assertTrue(line.startswith("*/30 * * * *"))
+        self.assertIn("check", line)
+        self.assertIn("/data/base.envymon", line)
+        self.assertIn("--exit-detail", line)
+        # A path with a space is shell-quoted so the cron line stays one command.
+        spaced = core.cron_line("/data/my base.envymon")
+        self.assertIn("'/data/my base.envymon'", spaced)
+
+    def test_launchd_plist(self):
+        import plistlib
+        xml = core.launchd_plist("/data/base.envymon", label="com.test.check", interval_seconds=1800)
+        spec = plistlib.loads(xml.encode())                      # must be a valid plist
+        self.assertEqual(spec["Label"], "com.test.check")
+        self.assertEqual(spec["StartInterval"], 1800)
+        self.assertEqual(spec["ProgramArguments"][1:], ["check", "/data/base.envymon", "--exit-detail"])
+        self.assertIn(core.PASSPHRASE_ENV, spec["EnvironmentVariables"])
+        for bad in (0, -5):
+            with self.assertRaises(IntegrityError):
+                core.launchd_plist("/x", interval_seconds=bad)
+        with self.assertRaises(IntegrityError):
+            core.launchd_plist("/x", label="  ")
+
     def test_ignore_globs_suppress_changes(self):
         path = self.baseline()
         (self.tree / "app.log").write_text("noise")          # added, but should be ignored

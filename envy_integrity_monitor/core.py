@@ -23,6 +23,8 @@ import hashlib
 import html
 import json
 import os
+import plistlib
+import shlex
 import stat
 import uuid
 from pathlib import Path
@@ -370,6 +372,39 @@ def check(source, secret, root=None, ignore=()):
 
 # Exit-code bits for `check --exit-detail`, so CI can react to *what* changed.
 EXIT_ADDED, EXIT_REMOVED, EXIT_MODIFIED = 1, 2, 4
+
+# Env var a scheduled, non-interactive check reads its passphrase from.
+PASSPHRASE_ENV = "ENVY_INTEGRITY_PASSPHRASE"
+
+
+def cron_line(baseline, binary="envy-integrity-monitor", schedule="0 * * * *"):
+    """A crontab line that runs a scheduled integrity check, exiting with the
+    ``--exit-detail`` bitmask. The passphrase must be supplied non-interactively via the
+    ``ENVY_INTEGRITY_PASSPHRASE`` environment variable (set it in the crontab above this
+    line). Storing a passphrase where the scheduler can read it weakens its secrecy — only
+    schedule checks on a host you trust."""
+    return f"{schedule} {shlex.quote(str(binary))} check {shlex.quote(str(baseline))} --exit-detail"
+
+
+def launchd_plist(baseline, binary="envy-integrity-monitor",
+                  label="com.envy.integrity.check", interval_seconds=3600):
+    """A macOS launchd job plist (XML) that runs a scheduled integrity check every
+    ``interval_seconds``. Same passphrase caveat as :func:`cron_line`: launchd does not see
+    your shell environment, so the passphrase has to live in the plist's
+    ``EnvironmentVariables`` (shown as a placeholder) or be injected another way — which
+    weakens its secrecy. Only schedule on a host you trust."""
+    if not label.strip():
+        raise IntegrityError("launchd label must not be empty")
+    if int(interval_seconds) <= 0:
+        raise IntegrityError("interval_seconds must be a positive number of seconds")
+    spec = {
+        "Label": label,
+        "ProgramArguments": [str(binary), "check", str(baseline), "--exit-detail"],
+        "StartInterval": int(interval_seconds),
+        "RunAtLoad": False,
+        "EnvironmentVariables": {PASSPHRASE_ENV: "REPLACE-WITH-YOUR-PASSPHRASE"},
+    }
+    return plistlib.dumps(spec).decode("utf-8")
 
 
 def change_bitmask(report):
