@@ -368,6 +368,28 @@ def check(source, secret, root=None, ignore=()):
                      "when, or whether the change is benign."}
 
 
+# Exit-code bits for `check --exit-detail`, so CI can react to *what* changed.
+EXIT_ADDED, EXIT_REMOVED, EXIT_MODIFIED = 1, 2, 4
+
+
+def change_bitmask(report):
+    """A bitmask of which classes of change a check found: ``EXIT_ADDED`` (1),
+    ``EXIT_REMOVED`` (2) and ``EXIT_MODIFIED`` (4), OR-ed together; 0 when clean.
+
+    A single 0/1 exit says only *whether* something changed. This lets a pipeline
+    tell a removed file (2) apart from a mere modification (4), or an addition (1),
+    and gate on the ones it cares about — a difference still proves change, not cause.
+    """
+    code = 0
+    if report["added"]:
+        code |= EXIT_ADDED
+    if report["removed"]:
+        code |= EXIT_REMOVED
+    if report["modified"]:
+        code |= EXIT_MODIFIED
+    return code
+
+
 def accept(source, destination, secret, root=None, ignore=()):
     """Re-scan, record the change summary in the journal, and write a new baseline revision.
 

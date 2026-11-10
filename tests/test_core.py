@@ -78,6 +78,19 @@ class IntegrityTest(unittest.TestCase):
         mod = report["modified"][0]
         self.assertNotEqual(mod["old_sha256"], mod["new_sha256"])
 
+    def test_change_bitmask(self):
+        path = self.baseline()
+        self.assertEqual(core.change_bitmask(core.check(path, self.SECRET)), 0)
+        # Only a modification -> MODIFIED bit (4).
+        (self.tree / "a.txt").write_text("ALPHA-changed")
+        self.assertEqual(core.change_bitmask(core.check(path, self.SECRET)), core.EXIT_MODIFIED)
+        # Add a removal and an addition -> all three bits set (1|2|4 == 7).
+        (self.tree / "sub" / "b.bin").unlink()
+        (self.tree / "c.new").write_text("new file")
+        code = core.change_bitmask(core.check(path, self.SECRET))
+        self.assertEqual(code, core.EXIT_ADDED | core.EXIT_REMOVED | core.EXIT_MODIFIED)
+        self.assertEqual(code, 7)
+
     def test_ignore_globs_suppress_changes(self):
         path = self.baseline()
         (self.tree / "app.log").write_text("noise")          # added, but should be ignored
