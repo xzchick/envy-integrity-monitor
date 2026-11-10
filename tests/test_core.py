@@ -138,7 +138,7 @@ class IntegrityTest(unittest.TestCase):
 
     def test_change_and_change_back_looks_unchanged(self):
         path = self.baseline()
-        original = (self.tree / "a.txt").read_text()
+        original = (self.tree / "a.txt").read_text(encoding="utf-8")
         (self.tree / "a.txt").write_text("temporarily different")
         (self.tree / "a.txt").write_text(original)
         self.assertTrue(core.check(path, self.SECRET)["clean"])
@@ -180,13 +180,13 @@ class IntegrityTest(unittest.TestCase):
         (self.tree / "a.txt").write_text("changed now")
         html_out = self.dir / "r.html"
         res = core.export(path, html_out, self.SECRET, "html")
-        text = html_out.read_text()
+        text = html_out.read_text(encoding="utf-8")
         self.assertIn("Content-Security-Policy", text)
         self.assertIn("a.txt", text)
         self.assertFalse(res["clean"])
         json_out = self.dir / "r.json"
         core.export(path, json_out, self.SECRET, "json")
-        report = json.loads(json_out.read_text())
+        report = json.loads(json_out.read_text(encoding="utf-8"))
         self.assertIn("limitations", report)
         self.assertEqual(len(report["modified"]), 1)
 
@@ -201,7 +201,7 @@ class IntegrityTest(unittest.TestCase):
         forged.write_bytes(core.encrypt_bytes(core._canonical(data), self.SECRET))
         out = self.dir / "r.html"
         core.export(forged, out, self.SECRET, "html")
-        body = out.read_text()
+        body = out.read_text(encoding="utf-8")
         self.assertNotIn("weird<name>", body)
         self.assertIn("&lt;name&gt;", body)
 
@@ -269,7 +269,7 @@ class IntegrityTest(unittest.TestCase):
         out = self.dir / "r.md"
         res = core.export(path, out, self.SECRET, "md")
         self.assertEqual(res["format"], "md")
-        text = out.read_text()
+        text = out.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("# Project — integrity check"))
         self.assertIn("## Added (1)", text)
         self.assertIn("new.txt", text)
@@ -283,7 +283,7 @@ class IntegrityTest(unittest.TestCase):
         path = self.baseline()
         out = self.dir / "c.md"
         core.export(path, out, self.SECRET, "md")
-        self.assertIn("CLEAN", out.read_text())
+        self.assertIn("CLEAN", out.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
