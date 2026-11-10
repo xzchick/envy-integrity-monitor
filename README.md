@@ -85,6 +85,14 @@ Download a bundle from the [latest release](https://github.com/xzchick/envy-inte
 
 Running `envy-integrity-monitor` with no arguments opens the window.
 
+### Homebrew (macOS, Apple Silicon)
+
+```sh
+brew install --cask xzchick/envy/envy-integrity-monitor
+```
+
+These builds aren't notarized, so if macOS blocks it on first run, add `--no-quarantine` to that command. Intel Macs, Linux and Windows: use the standalone bundle above.
+
 ### From pip (Python 3.10+)
 
 ```sh
