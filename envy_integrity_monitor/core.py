@@ -34,6 +34,7 @@ from pathlib import Path
 MAGIC = b"ENVYVAULT2\x00"
 MAX_ENVELOPE = 16 * 1024 * 1024        # the encrypted baseline
 MAX_FILES = 50000
+MAX_ROOTS = 64
 MAX_READ = 1024 * 1024 * 1024          # per-file hashing ceiling (1 GiB)
 MAX_REVISIONS = 10000
 MIN_PASSPHRASE = 12
@@ -154,12 +155,19 @@ def _validate_ignore(value):
 
 
 def _validate_entry(value):
-    if not isinstance(value, dict) or set(value) != {"path", "size", "sha256"}:
+    if not isinstance(value, dict) or set(value) not in (
+            {"path", "size", "sha256"}, {"path", "size", "sha256", "root_index"}):
         raise IntegrityError("Invalid baseline file entry")
     size = value["size"]
     if type(size) is not int or not 0 <= size <= MAX_READ:
         raise IntegrityError("Invalid baseline file size")
-    return {"path": _rel_text(value["path"]), "size": size, "sha256": _sha256(value["sha256"])}
+    norm = {"path": _rel_text(value["path"]), "size": size, "sha256": _sha256(value["sha256"])}
+    if "root_index" in value:
+        index = value["root_index"]
+        if type(index) is not int or not 0 <= index < MAX_ROOTS:
+            raise IntegrityError("Invalid baseline root index")
+        norm["root_index"] = index
+    return norm
 
 
 def _validate_check(value):
@@ -177,7 +185,7 @@ def _validate_check(value):
 
 
 def _validate_baseline(data):
-    fields = {"schema", "monitor_id", "title", "root", "created_utc", "revision",
+    fields = {"schema", "monitor_id", "title", "root", "roots", "created_utc", "revision",
               "previous_envelope_sha256", "files", "journal", "ignore"}
     if not isinstance(data, dict) or set(data) != fields or type(data["schema"]) is not int or data["schema"] != 1:
         raise IntegrityError("Unsupported encrypted baseline schema")
@@ -185,6 +193,11 @@ def _validate_baseline(data):
         raise IntegrityError("Invalid monitor title")
     if not isinstance(data["root"], str) or not data["root"] or len(data["root"]) > 4096:
         raise IntegrityError("Invalid monitored root path")
+    roots = data["roots"]
+    if (not isinstance(roots, list) or not roots or len(roots) > MAX_ROOTS
+            or any(not isinstance(r, str) or not r or len(r) > 4096 for r in roots)
+            or len(set(roots)) != len(roots) or roots[0] != data["root"]):
+        raise IntegrityError("Invalid monitored roots list")
     _validate_ignore(data["ignore"])
     try:
         uuid.UUID(data["monitor_id"])
@@ -194,16 +207,20 @@ def _validate_baseline(data):
     files = data["files"]
     if not isinstance(files, list) or len(files) > MAX_FILES:
         raise IntegrityError("Invalid baseline file list")
-    seen, previous_path = set(), None
+    nroots = len(data["roots"])
+    seen, previous_key = set(), None
     for entry in files:
         norm = _validate_entry(entry)
         if norm != entry:
             raise IntegrityError("Baseline file entry is not normalized")
-        if entry["path"] in seen:
+        if entry.get("root_index", 0) >= nroots:
+            raise IntegrityError("Baseline root index out of range")
+        key = (entry.get("root_index", 0), entry["path"])
+        if key in seen:
             raise IntegrityError("Duplicate baseline path")
-        if previous_path is not None and entry["path"] < previous_path:
+        if previous_key is not None and key < previous_key:
             raise IntegrityError("Baseline files must be sorted by path")
-        seen.add(entry["path"]); previous_path = entry["path"]
+        seen.add(key); previous_key = key
     revision, journal = data["revision"], data["journal"]
     if type(revision) is not int or not 0 <= revision or revision > MAX_REVISIONS or len(journal) != revision:
         raise IntegrityError("Invalid revision or journal length")
@@ -288,10 +305,13 @@ def _hash_file(path) -> str:
 # --- Load / write ------------------------------------------------------------
 
 def _migrate(data):
-    """Bring an older baseline forward in memory. The stored ignore list arrived in
-    v0.2; a baseline that predates it gets an empty one. The journal is unaffected."""
+    """Bring an older baseline forward in memory. The stored ignore list and the roots
+    list both arrived in v0.2; a baseline that predates them gets an empty ignore list and
+    a single-element roots list from its original root. The journal is unaffected."""
     if isinstance(data, dict) and "ignore" not in data:
         data["ignore"] = []
+    if isinstance(data, dict) and "roots" not in data and "root" in data:
+        data["roots"] = [data["root"]]
     return data
 
 
@@ -314,15 +334,48 @@ def _write(destination, data, secret):
             "files": len(data["files"]), "encrypted": True, "previous_revision_preserved": True}
 
 
-def create(destination, title, root, secret, ignore=()):
+def _normalize_roots(roots):
+    """Resolve one folder or several into a de-duplicated list of absolute paths."""
+    if isinstance(roots, (str, Path)):
+        roots = [roots]
+    out = []
+    for r in roots or []:
+        resolved = str(Path(r).expanduser().resolve())
+        if resolved not in out:
+            out.append(resolved)
+    if not out:
+        raise IntegrityError("At least one folder to monitor is required")
+    return out
+
+
+def _scan_roots(roots, ignore=()):
+    """Scan one or several roots into one sorted file list.
+
+    With a single root the entries are ``{path, size, sha256}`` with paths relative to it,
+    exactly as before. With several roots each entry also carries ``root_index`` (its
+    position in ``roots``), so a file is keyed by ``(root_index, path)`` and the same
+    relative path under different roots never collides.
+    """
+    if len(roots) == 1:
+        return scan_tree(roots[0], ignore)
+    entries = []
+    for index, root in enumerate(roots):
+        for entry in scan_tree(root, ignore):
+            entries.append({**entry, "root_index": index})
+    entries.sort(key=lambda e: (e["root_index"], e["path"]))
+    return entries
+
+
+def create(destination, title, roots, secret, ignore=()):
     ignore = sorted(set(_validate_ignore(list(ignore or ()))))
-    files = scan_tree(root, ignore)
+    root_list = _normalize_roots(roots)
+    files = _scan_roots(root_list, ignore)
     data = {"schema": 1, "monitor_id": str(uuid.uuid4()),
-            "title": _title(title), "root": str(Path(root).expanduser().resolve()),
+            "title": _title(title), "root": root_list[0], "roots": root_list,
             "created_utc": _utc(), "revision": 0, "previous_envelope_sha256": "0" * 64,
             "files": files, "journal": [], "ignore": ignore}
     result = _write(destination, data, secret)
-    return dict(result, baselined_files=len(files), ignore=ignore)
+    return dict(result, baselined_files=len(files), ignore=ignore, roots=root_list)
 
 
 def _title(value):
@@ -334,35 +387,48 @@ def _title(value):
 # --- Diff / check ------------------------------------------------------------
 
 def diff(baseline_files, current_files):
-    """Compare two sorted entry lists; return added/removed/modified/unchanged."""
-    base = {e["path"]: e for e in baseline_files}
-    cur = {e["path"]: e for e in current_files}
-    added = [cur[p] for p in sorted(cur.keys() - base.keys())]
-    removed = [base[p] for p in sorted(base.keys() - cur.keys())]
+    """Compare two sorted entry lists; return added/removed/modified/unchanged.
+
+    Entries are keyed by ``(root_index, path)`` so files from different roots never
+    collide; single-root entries have no ``root_index`` and key on the path alone.
+    """
+    def key(entry):
+        return (entry.get("root_index", 0), entry["path"])
+    base = {key(e): e for e in baseline_files}
+    cur = {key(e): e for e in current_files}
+    added = [cur[k] for k in sorted(cur.keys() - base.keys())]
+    removed = [base[k] for k in sorted(base.keys() - cur.keys())]
     modified, unchanged = [], 0
-    for p in sorted(base.keys() & cur.keys()):
-        if base[p]["sha256"] != cur[p]["sha256"] or base[p]["size"] != cur[p]["size"]:
-            modified.append({"path": p, "old_sha256": base[p]["sha256"], "new_sha256": cur[p]["sha256"],
-                             "old_size": base[p]["size"], "new_size": cur[p]["size"]})
+    for k in sorted(base.keys() & cur.keys()):
+        b, c = base[k], cur[k]
+        if b["sha256"] != c["sha256"] or b["size"] != c["size"]:
+            entry = {"path": b["path"], "old_sha256": b["sha256"], "new_sha256": c["sha256"],
+                     "old_size": b["size"], "new_size": c["size"]}
+            if "root_index" in b:
+                entry["root_index"] = b["root_index"]
+            modified.append(entry)
         else:
             unchanged += 1
     return {"added": added, "removed": removed, "modified": modified, "unchanged": unchanged}
 
 
-def check(source, secret, root=None, ignore=()):
-    """Re-scan the root and report changes since the baseline. Read-only.
+def check(source, secret, roots=None, ignore=()):
+    """Re-scan the monitored roots and report changes since the baseline. Read-only.
 
-    ``ignore`` globs suppress matching paths from both the current scan and the
-    baseline, so they are never reported as changed, added or removed.
+    ``roots`` overrides the stored roots (one folder or several); ``ignore`` globs
+    suppress matching paths from both the current scan and the baseline, so they are
+    never reported as changed, added or removed.
     """
     data, _ = _load(source, secret)
     # The baseline's stored globs always apply; any passed here are added on top.
     ignore = tuple(dict.fromkeys(tuple(data["ignore"]) + tuple(ignore or ())))
-    current = scan_tree(root or data["root"], ignore)
+    scan_roots = _normalize_roots(roots) if roots else data["roots"]
+    current = _scan_roots(scan_roots, ignore)
     baseline_files = [e for e in data["files"] if not _match_ignore(e["path"], ignore)] if ignore else data["files"]
     report = diff(baseline_files, current)
     changed = len(report["added"]) + len(report["removed"]) + len(report["modified"])
-    return {"monitor_id": data["monitor_id"], "title": data["title"], "root": root or data["root"],
+    return {"monitor_id": data["monitor_id"], "title": data["title"],
+            "root": scan_roots[0], "roots": scan_roots,
             "ignore": list(ignore), "revision": data["revision"], "scanned_utc": _utc(),
             "added": report["added"], "removed": report["removed"], "modified": report["modified"],
             "unchanged": report["unchanged"], "changed": changed, "clean": changed == 0,
@@ -425,16 +491,19 @@ def change_bitmask(report):
     return code
 
 
-def accept(source, destination, secret, root=None, ignore=()):
+def accept(source, destination, secret, roots=None, ignore=()):
     """Re-scan, record the change summary in the journal, and write a new baseline revision.
 
-    The baseline's stored ignore globs are honoured (so accepting does not re-add the
-    files you chose to ignore); any passed here are merged in and persisted.
+    ``roots`` overrides and persists the monitored roots (one folder or several). The
+    baseline's stored ignore globs are honoured (so accepting does not re-add the files
+    you chose to ignore); any passed here are merged in and persisted.
     """
     data, previous_envelope = _load(source, secret)
     merged = sorted(set(tuple(data["ignore"]) + tuple(_validate_ignore(list(ignore or ())))))
     data["ignore"] = merged
-    current = scan_tree(root or data["root"], merged)
+    scan_roots = _normalize_roots(roots) if roots else data["roots"]
+    data["root"], data["roots"] = scan_roots[0], scan_roots
+    current = _scan_roots(scan_roots, merged)
     baseline_files = [e for e in data["files"] if not _match_ignore(e["path"], merged)] if merged else data["files"]
     report = diff(baseline_files, current)
     summary = {"scanned_utc": _utc(),
@@ -455,7 +524,7 @@ def accept(source, destination, secret, root=None, ignore=()):
 def inspect(source, secret):
     data, envelope = _load(source, secret)
     return {"monitor_id": data["monitor_id"], "title": data["title"], "root": data["root"],
-            "ignore": data["ignore"],
+            "roots": data["roots"], "ignore": data["ignore"],
             "revision": data["revision"], "created_utc": data["created_utc"], "envelope_sha256": envelope,
             "files": data["files"],
             "journal": [{"recorded_utc": r["recorded_utc"], **r["check"]} for r in data["journal"]],
@@ -465,12 +534,14 @@ def inspect(source, secret):
 
 # --- Plaintext export --------------------------------------------------------
 
-def export(source, destination, secret, format="html", root=None):
+def export(source, destination, secret, format="html", roots=None):
     if format not in ("html", "json", "md"):
         raise IntegrityError("Export format must be html, json or md")
     data, envelope = _load(source, secret)
-    report = check(source, secret, root)
+    report = check(source, secret, roots)
+    roots_text = "; ".join(data["roots"])
     out = {"monitor": {"monitor_id": data["monitor_id"], "title": data["title"], "root": data["root"],
+                       "roots": data["roots"],
                        "revision": data["revision"], "created_utc": data["created_utc"]},
            "scanned_utc": report["scanned_utc"], "clean": report["clean"],
            "added": report["added"], "removed": report["removed"], "modified": report["modified"],
@@ -486,7 +557,7 @@ def export(source, destination, secret, format="html", root=None):
             f"**{changed} change(s)** since the baseline."
         lines = [f"# {data['title']} — integrity check", "", out["limitations"], "",
                  f"- **Monitor:** `{data['monitor_id']}`",
-                 f"- **Root:** `{data['root']}`",
+                 f"- **{'Roots' if len(data['roots']) > 1 else 'Root'}:** `{roots_text}`",
                  f"- **Revision:** {data['revision']}",
                  f"- **Scanned:** {report['scanned_utc']}",
                  f"- {verdict}", "",
@@ -518,7 +589,8 @@ def export(source, destination, secret, format="html", root=None):
                   "table{border-collapse:collapse;width:100%;margin:0 0 2rem}th,td{border:1px solid #777;padding:.4rem .6rem;text-align:left;vertical-align:top}"
                   "th{background:#eee}code{word-break:break-all;font-size:.85em}</style></head><body><h1>" + esc(data["title"]) +
                   "</h1><p>" + esc(out["limitations"]) + "</p><p>Monitor: " + esc(data["monitor_id"]) +
-                  " · Revision: " + str(data["revision"]) + " · Root: " + esc(data["root"]) +
+                  " · Revision: " + str(data["revision"]) +
+                  (" · Roots: " if len(data["roots"]) > 1 else " · Root: ") + esc(roots_text) +
                   "</p><p>Scanned UTC: " + esc(report["scanned_utc"]) + " · Encrypted baseline SHA-256: " + envelope +
                   "</p><h2>" + verdict + "</h2>"
                   "<h3>Added (" + str(len(report["added"])) + ")</h3><table><thead><tr><th>Path</th><th>Size</th><th>SHA-256</th></tr></thead><tbody>" + plain(report["added"]) + "</tbody></table>"

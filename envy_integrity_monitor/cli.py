@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     new = commands.add_parser("baseline", help="create an encrypted baseline of a folder")
     new.add_argument("destination", help="a new baseline file; never overwritten")
-    new.add_argument("folder", help="the folder to monitor")
+    new.add_argument("folder", nargs="+", help="one or more folders to monitor")
     new.add_argument("--title", required=True, help="a name for this monitor")
     new.add_argument("--ignore", action="append", default=[], metavar="GLOB",
                      help="skip paths matching this glob; stored in the baseline and applied to every "
@@ -37,7 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     chk = commands.add_parser("check", help="report changes since the baseline (read-only)")
     chk.add_argument("baseline")
-    chk.add_argument("--folder", default=None, help="override the stored root folder")
+    chk.add_argument("--folder", action="append", default=None, metavar="DIR",
+                     help="override the stored monitored folder(s) (repeatable)")
     chk.add_argument("--json", action="store_true", help="emit the full change report as JSON")
     chk.add_argument("--ignore", action="append", default=[], metavar="GLOB",
                      help="skip paths matching this glob (repeatable, .gitignore-style)")
@@ -48,7 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     acc = commands.add_parser("accept", help="record the current state as a new baseline revision")
     acc.add_argument("baseline")
     acc.add_argument("destination", help="a new baseline file; never overwritten")
-    acc.add_argument("--folder", default=None)
+    acc.add_argument("--folder", action="append", default=None, metavar="DIR",
+                     help="override and persist the monitored folder(s) (repeatable)")
     acc.add_argument("--ignore", action="append", default=[], metavar="GLOB",
                      help="add a glob to the baseline's stored ignore list (repeatable)")
 
@@ -71,7 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("baseline")
     exp.add_argument("destination", help="a new report file; never overwritten")
     exp.add_argument("--format", default="html", choices=("html", "json", "md"))
-    exp.add_argument("--folder", default=None)
+    exp.add_argument("--folder", action="append", default=None, metavar="DIR",
+                     help="override the monitored folder(s) for this report (repeatable)")
     return root
 
 
