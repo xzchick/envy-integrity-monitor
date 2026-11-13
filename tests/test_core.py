@@ -48,6 +48,57 @@ class IntegrityTest(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             core.create(self.dir / "s", "t", self.tree, b"short")
 
+    # ----- multiple roots (v0.2) ---------------------------------------
+    def test_single_root_has_no_root_index(self):
+        path = self.baseline()
+        data, _ = core._load(path, self.SECRET)
+        self.assertEqual(len(data["roots"]), 1)
+        self.assertTrue(all("root_index" not in e for e in data["files"]))   # byte-identical entries
+
+    def test_multiple_roots_baseline_and_check(self):
+        tree2 = self.dir / "watched2"
+        (tree2 / "x").mkdir(parents=True)
+        (tree2 / "conf.ini").write_text("a=1")
+        (tree2 / "x" / "y.txt").write_text("y")
+        path = self.dir / "multi.envymon"
+        res = core.create(path, "Multi", [self.tree, tree2], self.SECRET)
+        self.assertEqual(len(res["roots"]), 2)
+        # Both trees appear, each entry tagged with its root_index; nothing collides.
+        data, _ = core._load(path, self.SECRET)
+        self.assertEqual(len(data["files"]), 4)             # a.txt, sub/b.bin, conf.ini, x/y.txt
+        self.assertEqual({e["root_index"] for e in data["files"]}, {0, 1})
+        self.assertTrue(core.check(path, self.SECRET)["clean"])
+        # A change in the SECOND root (index 1) is detected under that root.
+        (tree2 / "conf.ini").write_text("a=2")
+        report = core.check(path, self.SECRET)
+        self.assertFalse(report["clean"])
+        self.assertEqual(len(report["modified"]), 1)
+        mod = report["modified"][0]
+        self.assertEqual(mod["path"], "conf.ini")
+        self.assertEqual(mod["root_index"], 1)
+        self.assertEqual(report["roots"][mod["root_index"]], str(Path(tree2).resolve()))
+
+    def test_same_relative_path_in_two_roots_does_not_collide(self):
+        tree2 = self.dir / "watched2"; tree2.mkdir()
+        (tree2 / "a.txt").write_text("different alpha")     # same relname as self.tree/a.txt
+        path = self.dir / "multi.envymon"
+        core.create(path, "Multi", [self.tree, tree2], self.SECRET)
+        data, _ = core._load(path, self.SECRET)
+        a_entries = [e for e in data["files"] if e["path"] == "a.txt"]
+        self.assertEqual(len(a_entries), 2)                 # one per root, distinct root_index
+        self.assertEqual({e["root_index"] for e in a_entries}, {0, 1})
+        self.assertTrue(core.check(path, self.SECRET)["clean"])
+
+    def test_old_baseline_without_roots_migrates(self):
+        path = self.baseline()
+        data, _ = core._load(path, self.SECRET)
+        del data["roots"]                                   # simulate a pre-v0.2 baseline
+        legacy = self.dir / "legacy.envymon"
+        legacy.write_bytes(core.encrypt_bytes(core._canonical(data), self.SECRET))
+        loaded, _ = core._load(legacy, self.SECRET)         # _migrate fills roots from root
+        self.assertEqual(loaded["roots"], [data["root"]])
+        self.assertTrue(core.check(legacy, self.SECRET)["clean"])
+
     def test_scan_skips_symlinks(self):
         target = self.tree / "a.txt"
         try:
