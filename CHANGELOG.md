@@ -2,6 +2,13 @@
 
 All notable changes to this project. This project adheres to semantic versioning.
 
+## Unreleased
+
+- Window: one baseline can cover several folders, with optional ignore globs, from a new "New baseline" dialog
+- Window: Schedule… shows a ready cron line or launchd job (with the passphrase caveat) and copies it
+- Window: Changes view gains a type filter, a change summary, and a Root column for multi-folder baselines
+- Offscreen GUI tests that drive the real window
+
 ## v0.2.2 — 2026-11-16
 
 - Attach a CycloneDX SBOM to each release (covered by the signed checksums)

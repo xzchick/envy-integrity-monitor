@@ -51,7 +51,119 @@ def _build():
     from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton, QPlainTextEdit,
                                  QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
                                  QAbstractItemView, QVBoxLayout, QHBoxLayout, QInputDialog,
-                                 QFileDialog, QMessageBox, QLineEdit as QLE)
+                                 QFileDialog, QMessageBox, QLineEdit as QLE, QDialog,
+                                 QDialogButtonBox, QListWidget, QComboBox)
+
+    class NewBaselineDialog(QDialog):
+        """Collect a title, one or more folders, and optional ignore globs."""
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setWindowTitle("New baseline"); self.setStyleSheet(STYLE); self.setMinimumWidth(600)
+            lay = QVBoxLayout(self); lay.setSpacing(8)
+            lay.addWidget(self._label("MONITOR TITLE"))
+            self.title = QLE(); self.title.setAccessibleName("Monitor title"); lay.addWidget(self.title)
+            lay.addWidget(self._label("FOLDERS TO MONITOR  ·  ONE BASELINE CAN COVER SEVERAL"))
+            self.roots = QListWidget(); self.roots.setAccessibleName("Monitored folders")
+            self.roots.setMinimumHeight(120); lay.addWidget(self.roots)
+            row = QHBoxLayout()
+            for caption, handler in (("Add folder…", self._pick), ("Remove selected", self.remove_selected)):
+                b = QPushButton(caption); b.setObjectName("pick"); b.clicked.connect(handler); row.addWidget(b)
+            row.addStretch(1); lay.addLayout(row)
+            lay.addWidget(self._label("IGNORE GLOBS  ·  OPTIONAL, COMMA-SEPARATED"))
+            self.ignore = QLE(); self.ignore.setPlaceholderText("e.g.  *.log, .git/*, node_modules/*")
+            self.ignore.setAccessibleName("Ignore globs"); lay.addWidget(self.ignore)
+            self.error = QLabel(""); self.error.setObjectName("err"); self.error.setWordWrap(True)
+            lay.addWidget(self.error)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+            buttons.accepted.connect(self._accept); buttons.rejected.connect(self.reject)
+            lay.addWidget(buttons)
+
+        def _label(self, text):
+            lab = QLabel(text); lab.setObjectName("tag"); return lab
+
+        def _pick(self):
+            folder = QFileDialog.getExistingDirectory(self, "Choose a folder to monitor")
+            if folder:
+                self.add_root(folder)
+
+        def add_root(self, folder):
+            folder = str(Path(folder))
+            if folder not in self.root_list():
+                self.roots.addItem(folder)
+
+        def remove_selected(self):
+            for item in self.roots.selectedItems():
+                self.roots.takeItem(self.roots.row(item))
+
+        def root_list(self):
+            return [self.roots.item(i).text() for i in range(self.roots.count())]
+
+        def values(self):
+            ignore = [g.strip() for g in self.ignore.text().split(",") if g.strip()]
+            return self.title.text().strip(), self.root_list(), ignore
+
+        def validate(self):
+            """Return a problem message, or None when the form is ready."""
+            title, roots, ignore = self.values()
+            if not title:
+                return "Give the monitor a title."
+            if not roots:
+                return "Add at least one folder."
+            missing = [r for r in roots if not Path(r).is_dir()]
+            if missing:
+                return f"Not a folder: {missing[0]}"
+            try:
+                core._validate_ignore(ignore)
+            except IntegrityError as exc:
+                return str(exc)
+            return None
+
+        def _accept(self):
+            problem = self.validate()
+            if problem:
+                self.error.setText(problem); return
+            self.accept()
+
+    class ScheduleDialog(QDialog):
+        """Show a ready-to-use cron line or launchd job for scheduled checks."""
+
+        def __init__(self, baseline, parent=None):
+            super().__init__(parent)
+            self.baseline = str(baseline)
+            self.setWindowTitle("Schedule checks"); self.setStyleSheet(STYLE); self.setMinimumSize(680, 460)
+            lay = QVBoxLayout(self); lay.setSpacing(8)
+            self.kind = QComboBox(); self.kind.addItems(["cron  (Linux / macOS)", "launchd  (macOS)"])
+            self.kind.setAccessibleName("Scheduler"); self.kind.currentIndexChanged.connect(self.refresh)
+            lay.addWidget(self.kind)
+            note = QLabel(
+                f"Scheduled checks can't prompt, so the passphrase comes from the {core.PASSPHRASE_ENV} "
+                "environment variable. Storing it where a scheduler can read it weakens its secrecy — "
+                "only schedule on a machine you trust. The exit code says what changed: "
+                "1 added · 2 removed · 4 modified (OR-ed), 0 when clean.")
+            note.setObjectName("warn"); note.setWordWrap(True); lay.addWidget(note)
+            self.text = QPlainTextEdit(); self.text.setObjectName("mono"); self.text.setReadOnly(True)
+            self.text.setAccessibleName("Schedule snippet"); lay.addWidget(self.text, 1)
+            row = QHBoxLayout()
+            copy = QPushButton("Copy"); copy.setObjectName("go"); copy.clicked.connect(self.copy)
+            self.copied = QLabel(""); self.copied.setObjectName("status")
+            close = QPushButton("Close"); close.setObjectName("pick"); close.clicked.connect(self.accept)
+            row.addWidget(copy); row.addWidget(self.copied, 1); row.addWidget(close); lay.addLayout(row)
+            self.refresh()
+
+        def snippet(self):
+            if self.kind.currentIndex() == 0:
+                return ("# Add with:  crontab -e     (runs hourly)\n"
+                        f"{core.PASSPHRASE_ENV}=REPLACE-WITH-YOUR-PASSPHRASE\n"
+                        + core.cron_line(self.baseline) + "\n")
+            return core.launchd_plist(self.baseline)
+
+        def refresh(self):
+            self.text.setPlainText(self.snippet()); self.copied.setText("")
+
+        def copy(self):
+            QApplication.clipboard().setText(self.text.toPlainText())
+            self.copied.setText("Copied — replace the placeholder passphrase before using it.")
 
     class Header(QWidget):
         def __init__(self):
@@ -154,7 +266,8 @@ def _build():
                                            ("Lock", self.lock, "pick"),
                                            ("Check now", self.check_now, "go"),
                                            ("Accept current state", self.accept_state, "pick"),
-                                           ("Export report", self.export_report, "pick")):
+                                           ("Export report", self.export_report, "pick"),
+                                           ("Schedule…", self.show_schedule, "pick")):
                 b = QPushButton(caption); b.setObjectName(name)
                 b.setCursor(Qt.CursorShape.PointingHandCursor); b.clicked.connect(handler)
                 controls.addWidget(b)
@@ -167,10 +280,19 @@ def _build():
             bl.addWidget(self.mon_header)
 
             self.views = QTabWidget(); self.views.setObjectName("tabs")
-            self.t_changes = make_table(["Status", "Path", "Size", "SHA-256"])
-            self.t_baseline = make_table(["Path", "Size", "SHA-256"])
+            self.t_changes = make_table(["Status", "Root", "Path", "Size", "SHA-256"])
+            self.t_baseline = make_table(["Root", "Path", "Size", "SHA-256"])
             self.t_history = make_table(["Checked UTC", "Added", "Removed", "Modified", "Unchanged"])
-            self.views.addTab(self.t_changes, "Changes")
+            changes_page = QWidget(); cl = QVBoxLayout(changes_page); cl.setContentsMargins(0, 8, 0, 0)
+            frow = QHBoxLayout()
+            self.change_filter = QComboBox(); self.change_filter.addItems(["All changes", "Added", "Removed", "Modified"])
+            self.change_filter.setAccessibleName("Show changes of type")
+            self.change_filter.currentIndexChanged.connect(self._render_changes)
+            self.change_summary = QLabel(""); self.change_summary.setObjectName("status")
+            frow.addWidget(self.change_filter); frow.addWidget(self.change_summary, 1)
+            cl.addLayout(frow); cl.addWidget(self.t_changes, 1)
+            self._change_rows, self._roots = [], []
+            self.views.addTab(changes_page, "Changes")
             self.views.addTab(self.t_baseline, "Baseline")
             self.views.addTab(self.t_history, "History")
             bl.addWidget(self.views, 1)
@@ -207,12 +329,10 @@ def _build():
                 self._warn(str(exc)); return None
 
         def new_baseline(self):
-            folder = QFileDialog.getExistingDirectory(self, "Choose a folder to monitor")
-            if not folder:
+            dialog = self.make_new_baseline_dialog()
+            if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            title, ok = QInputDialog.getText(self, "New baseline", "Monitor title:")
-            if not ok or not title.strip():
-                return
+            title, roots, ignore = dialog.values()
             dest, _ = QFileDialog.getSaveFileName(self, "Save the encrypted baseline", "monitor.envymon",
                                                   "Baseline (*.envymon);;All files (*)")
             if not dest:
@@ -220,15 +340,30 @@ def _build():
             secret = self._ask_passphrase(confirm=True)
             if secret is None:
                 return
+            self.create_baseline(dest, title, roots, ignore, secret)
+
+        def create_baseline(self, dest, title, roots, ignore, secret):
             try:
                 if Path(dest).exists():
                     Path(dest).unlink()
-                core.create(dest, title.strip(), folder, secret)
+                core.create(dest, title, roots, secret, ignore)
                 self._open_path(Path(dest), secret)
-                self._warn(f"Baselined {len(self.data['files'])} files under\n{folder}",
+                where = roots[0] if len(roots) == 1 else f"{len(roots)} folders"
+                self._warn(f"Baselined {len(self.data['files'])} files under\n{where}",
                            icon=QMessageBox.Icon.Information, title="Baseline created")
             except (IntegrityError, OSError) as exc:
                 self._warn(str(exc))
+
+        def make_new_baseline_dialog(self):
+            return NewBaselineDialog(self)
+
+        def make_schedule_dialog(self):
+            return ScheduleDialog(self.baseline, self)
+
+        def show_schedule(self):
+            if not self.baseline:
+                return self._warn("Open a baseline first.")
+            self.make_schedule_dialog().exec()
 
         def open_baseline(self):
             path, _ = QFileDialog.getOpenFileName(self, "Open an encrypted baseline", "",
@@ -246,8 +381,9 @@ def _build():
             except IntegrityError as exc:
                 self._warn(str(exc)); return
             self.baseline, self.secret, self.data, self.last_report = path, secret, data, None
+            self._roots = list(data.get("roots") or [data["root"]])
             self._set_enabled(True)
-            self.t_changes.setRowCount(0)
+            self.t_changes.setRowCount(0); self._change_rows = []; self.change_summary.setText("")
             self._refresh_header()
             self._fill_baseline(data["files"])
             self._fill_history(data["journal"])
@@ -326,9 +462,13 @@ def _build():
                                                       f"-{len(r['removed'])} changed")
             else:
                 verdict = "not checked yet"
+            roots = self._roots or [d["root"]]
+            where = (f"root: {roots[0]}" if len(roots) == 1
+                     else f"{len(roots)} roots: " + "  ·  ".join(roots))
+            ignore = f"\nignoring: {', '.join(d['ignore'])}" if d.get("ignore") else ""
             self.mon_header.setPlainText(
                 f"{d['title']}  ·  revision {d['revision']}  ·  {len(d['files'])} files  ·  {verdict}\n"
-                f"root: {d['root']}")
+                f"{where}{ignore}")
             if self.baseline:
                 self.path_label.setText(str(self.baseline))
 
@@ -338,32 +478,56 @@ def _build():
                 item.setForeground(QColor(color))
             return item
 
+        def _root_cell(self, entry):
+            roots = self._roots
+            idx = entry.get("root_index", 0)
+            full = roots[idx] if 0 <= idx < len(roots) else "?"
+            item = self._cell(Path(full).name or full, LAVENDER)
+            item.setToolTip(full)
+            return item
+
         def _fill_changes(self, report):
-            rows = ([("added", e) for e in report["added"]] +
-                    [("removed", e) for e in report["removed"]] +
-                    [("modified", e) for e in report["modified"]])
+            if report.get("roots"):
+                self._roots = list(report["roots"])
+            self._change_rows = ([("added", e) for e in report["added"]] +
+                                 [("removed", e) for e in report["removed"]] +
+                                 [("modified", e) for e in report["modified"]])
+            self.change_summary.setText(
+                f"+{len(report['added'])} added  ·  −{len(report['removed'])} removed  ·  "
+                f"~{len(report['modified'])} modified  ·  {report['unchanged']} unchanged")
+            self._render_changes()
+
+        def _render_changes(self):
+            wanted = {1: "added", 2: "removed", 3: "modified"}.get(self.change_filter.currentIndex())
+            rows = [(s, e) for s, e in self._change_rows if wanted is None or s == wanted]
             t = self.t_changes; t.setRowCount(len(rows))
+            t.setColumnHidden(1, len(self._roots) <= 1)
             for i, (status, e) in enumerate(rows):
                 t.setItem(i, 0, self._cell(status, STATUS_COLOR[status]))
-                t.setItem(i, 1, self._cell(e["path"], INK))
+                t.setItem(i, 1, self._root_cell(e))
+                t.setItem(i, 2, self._cell(e["path"], INK))
                 if status == "modified":
-                    t.setItem(i, 2, self._cell(f"{e['old_size']} → {e['new_size']}"))
-                    t.setItem(i, 3, self._cell(f"{e['old_sha256'][:12]}… → {e['new_sha256'][:12]}…"))
+                    t.setItem(i, 3, self._cell(f"{e['old_size']} → {e['new_size']}"))
+                    t.setItem(i, 4, self._cell(f"{e['old_sha256'][:12]}… → {e['new_sha256'][:12]}…"))
                 else:
-                    t.setItem(i, 2, self._cell(e["size"]))
-                    t.setItem(i, 3, self._cell(e["sha256"]))
+                    t.setItem(i, 3, self._cell(e["size"]))
+                    t.setItem(i, 4, self._cell(e["sha256"]))
             t.resizeColumnsToContents(); t.horizontalHeader().setStretchLastSection(True)
-            if not rows:
+            if not rows and self.last_report is not None:
                 t.setRowCount(1)
-                t.setItem(0, 0, self._cell("clean", GREEN))
-                t.setItem(0, 1, self._cell("No changes since the baseline."))
+                clean = not self._change_rows
+                t.setItem(0, 0, self._cell("clean" if clean else "—", GREEN if clean else DIM))
+                t.setItem(0, 2, self._cell("No changes since the baseline." if clean
+                                           else "No changes of this type."))
 
         def _fill_baseline(self, files):
             t = self.t_baseline; t.setRowCount(len(files))
+            t.setColumnHidden(0, len(self._roots) <= 1)
             for i, e in enumerate(files):
-                t.setItem(i, 0, self._cell(e["path"], CYAN))
-                t.setItem(i, 1, self._cell(e["size"]))
-                t.setItem(i, 2, self._cell(e["sha256"]))
+                t.setItem(i, 0, self._root_cell(e))
+                t.setItem(i, 1, self._cell(e["path"], CYAN))
+                t.setItem(i, 2, self._cell(e["size"]))
+                t.setItem(i, 3, self._cell(e["sha256"]))
             t.resizeColumnsToContents(); t.horizontalHeader().setStretchLastSection(True)
 
         def _fill_history(self, journal):
@@ -427,6 +591,14 @@ QPushButton#go:hover {{ background: {CYAN}; }}
 QPushButton#pick {{ background: {PANEL_HI}; border: 1px solid {LAVENDER}; border-radius: 9px; color: {INK};
                     font-weight: bold; padding: 9px 14px; }}
 QPushButton#pick:hover {{ background: #1b2150; }}
+#tag {{ color: {MUTED}; font-weight: bold; font-size: 11px; letter-spacing: 1px; }}
+#err {{ color: {PINK}; font-size: 12px; }}
+#warn {{ color: {AMBER}; font-size: 12px; }}
+QDialog {{ background: {BG}; }}
+QLineEdit, QListWidget, QComboBox {{ background: {PANEL_HI}; border: 1px solid {LINE}; border-radius: 8px;
+                                      padding: 7px 9px; color: {INK}; }}
+QLineEdit:focus, QListWidget:focus, QComboBox:focus {{ border: 1px solid {CYAN}; }}
+QListWidget::item:selected {{ background: {VIOLET}; }}
 """
 
 
