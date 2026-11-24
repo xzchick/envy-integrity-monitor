@@ -2,12 +2,13 @@
 
 All notable changes to this project. This project adheres to semantic versioning.
 
-## Unreleased
+## v0.2.3 — 2026-11-24
 
 - Window: one baseline can cover several folders, with optional ignore globs, from a new "New baseline" dialog
 - Window: Schedule… shows a ready cron line or launchd job (with the passphrase caveat) and copies it
 - Window: Changes view gains a type filter, a change summary, and a Root column for multi-folder baselines
 - Offscreen GUI tests that drive the real window
+- Add a verified one-line Linux installer (`install.sh`)
 
 ## v0.2.2 — 2026-11-16
 
